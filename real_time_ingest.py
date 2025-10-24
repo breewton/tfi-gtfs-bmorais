@@ -18,16 +18,16 @@ try:
 except Exception as e:
     print(f"Error: {e}")
 
+####################################################################
+# Fetch live data from the API manually without using the GTFS class
+####################################################################
+
 api_key = local_settings.API_KEY
 header = {
     "X-API-Key": api_key,
     "Accept": "application/json"
 }
 
-
-####################################################################
-# Fetch live data from the API manually without using the GTFS class
-####################################################################
 end_point = settings.GTFS_LIVE_URL
 
 try:
