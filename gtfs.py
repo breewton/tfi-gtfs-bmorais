@@ -24,9 +24,11 @@ def _b2s(b):
 class GTFS:
     def __init__(self, live_url:str, api_key: str, redis_url:str=None, rebuild_cache:bool = False, filter_stops:list=None, profile_memory:bool=False):
         # Exit with error if static data doesn't exist
-        if check_for_new_static_data():
+
+        # TODO: after resolving issue with geo ip blocking, check for new static data
+        '''if check_for_new_static_data():
             logging.error("New static GTFS data exists. Download it with `python gtfs.py --download` and try again.")
-            sys.exit(1)
+            sys.exit(1)'''
 
         logging.info(f"""Initializing GTFS with:
             live_url={live_url}
