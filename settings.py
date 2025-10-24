@@ -16,6 +16,10 @@ DATA_DIR = Path(os.environ.get('DATA_DIR', 'data'))
 SSL_CERT = os.environ.get('SSL_CERT', None)
 SSL_KEY = os.environ.get('SSL_KEY', None)
 
+# CHANGE(tfi-gtfs): Add REALTIME_ONLY flag to run without static data.
+# Run without static GTFS data; rely only on the real-time feed
+REALTIME_ONLY = str(os.environ.get('REALTIME_ONLY', 'false')).lower() in ('1', 'true', 'yes', 'on')
+
 # set default logging level to INFO
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
 if LOG_LEVEL not in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']:
@@ -32,4 +36,15 @@ if FILTER_STOPS:
 try:
     from local_settings import *
 except ImportError:
+    pass
+
+# CHANGE(tfi-gtfs): Allow API key fallback from venv/local_settings.py.
+# Also allow a fallback local settings in venv/local_settings.py if present
+try:
+    venv_local_settings = Path(__file__).parent / 'venv' / 'local_settings.py'
+    if venv_local_settings.exists():
+        with open(venv_local_settings, 'r') as f:
+            code = f.read()
+        exec(compile(code, str(venv_local_settings), 'exec'), globals(), globals())
+except Exception:
     pass

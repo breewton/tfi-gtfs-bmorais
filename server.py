@@ -242,13 +242,15 @@ if __name__ == "__main__":
     if args.filter is not None:
         filter_stops = args.filter.split(',')
 
+    # CHANGE(tfi-gtfs): Skip static download/rebuild when REALTIME_ONLY is enabled.
     # prepare to fork a sub-process to download or reparse static data
     sub_process_args = None
-    if check_for_new_static_data():
-        sub_process_args = ["python", "gtfs.py", "--download", "--rebuild-cache"]
-    elif not args.redis and not check_cache_file() or not check_cache_info(filter_stops):
-        logging.info(f"Rebuilding.")
-        sub_process_args = ["python", "gtfs.py", "--rebuild-cache"]
+    if not getattr(settings, 'REALTIME_ONLY', False):
+        if check_for_new_static_data():
+            sub_process_args = ["python", "gtfs.py", "--download", "--rebuild-cache"]
+        elif not args.redis and not check_cache_file() or not check_cache_info(filter_stops):
+            logging.info(f"Rebuilding.")
+            sub_process_args = ["python", "gtfs.py", "--rebuild-cache"]
 
     extra_sub_process_args = []
     if filter_stops is not None:
@@ -272,6 +274,7 @@ if __name__ == "__main__":
     )
     start_scheduled_jobs(gtfs, args.polling_period, extra_sub_process_args)
 
+    # CHANGE(tfi-gtfs): Arrivals endpoint supports raw stop_id in realtime-only mode.
     # set up the API endpoint
     @app.route('/api/v1/arrivals')
     @format_response
@@ -280,12 +283,46 @@ if __name__ == "__main__":
         stop_numbers = request.args.getlist('stop')
         arrivals = {}
         for stop_number in stop_numbers:
-            if gtfs.is_valid_stop_number(stop_number):
-                arrivals[stop_number] = {
-                    'stop_name': gtfs.get_stop_name(stop_number),
-                    'arrivals': gtfs.get_scheduled_arrivals(stop_number, now, datetime.timedelta(minutes=args.minutes))
-                }
+            if getattr(settings, 'REALTIME_ONLY', False):
+                # In realtime-only mode, accept raw stop_id or known stop_number
+                items = gtfs.get_scheduled_arrivals(stop_number, now, datetime.timedelta(minutes=args.minutes))
+                if items:
+                    arrivals[stop_number] = {
+                        'stop_name': gtfs.get_stop_name(stop_number) or '',
+                        'arrivals': items
+                    }
+            else:
+                if gtfs.is_valid_stop_number(stop_number):
+                    arrivals[stop_number] = {
+                        'stop_name': gtfs.get_stop_name(stop_number),
+                        'arrivals': gtfs.get_scheduled_arrivals(stop_number, now, datetime.timedelta(minutes=args.minutes))
+                    }
         return arrivals
+
+    # CHANGE(tfi-gtfs): Helper endpoint to discover recent stop_ids from live feed.
+    # List recently seen stop_ids from the live feed (realtime-only helper)
+    @app.route('/api/v1/recent-stops')
+    @format_response
+    def recent_stops():
+        if not getattr(settings, 'REALTIME_ONLY', False):
+            return { 'error': 'Endpoint available only in REALTIME_ONLY mode' }
+        # Gather keys under 'live_by_stop_id'
+        # store.Store uses in-memory dict without a direct key listing per namespace; expose via internal data
+        stops = []
+        try:
+            # Best-effort introspection of keys seen so far
+            data = gtfs.store.data.get('live_by_stop_id', {})
+            for stop_id, items in data.items():
+                # items may be (timestamp,value) if cached; normalize
+                if isinstance(items, tuple) and len(items) == 2 and isinstance(items[0], int):
+                    _, items = items
+                latest_ts = max((i.get('timestamp', 0) for i in items), default=0)
+                stops.append({ 'stop_id': stop_id, 'last_seen': datetime.datetime.fromtimestamp(latest_ts) if latest_ts else None, 'count': len(items) })
+            # sort by last_seen desc
+            stops.sort(key=lambda s: s['last_seen'] or datetime.datetime.fromtimestamp(0), reverse=True)
+        except Exception:
+            pass
+        return { 'stops': stops }
 
     # serve a basic static page with a link to /api/v1/arrivals at the root
     @app.route('/')

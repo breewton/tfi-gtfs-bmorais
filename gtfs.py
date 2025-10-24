@@ -23,10 +23,14 @@ def _b2s(b):
 
 class GTFS:
     def __init__(self, live_url:str, api_key: str, redis_url:str=None, rebuild_cache:bool = False, filter_stops:list=None, profile_memory:bool=False):
-        # Exit with error if static data doesn't exist
-        if check_for_new_static_data():
-            logging.error("New static GTFS data exists. Download it with `python gtfs.py --download` and try again.")
-            sys.exit(1)
+        # CHANGE(tfi-gtfs): Gate static requirements behind REALTIME_ONLY.
+        # Optionally skip all static GTFS requirements
+        # If not REALTIME_ONLY mode, check for new static data
+        if not getattr(settings, 'REALTIME_ONLY', False):
+            # Exit with error if static data doesn't exist
+            if check_for_new_static_data():
+                logging.error("New static GTFS data exists. Download it with `python gtfs.py --download` and try again.")
+                sys.exit(1)
 
         logging.info(f"""Initializing GTFS with:
             live_url={live_url}
@@ -53,8 +57,11 @@ class GTFS:
         if rebuild_cache:
             self.store.clear_cache()
 
-        if self.store.get('status', "initialized") is None:
-            self.load_static()
+        # CHANGE(tfi-gtfs): Avoid loading static cache in realtime-only mode.
+        # If not REALTIME_ONLY mode, load static data
+        if not getattr(settings, 'REALTIME_ONLY', False):
+            if self.store.get('status', "initialized") is None:
+                self.load_static()
 
         if profile_memory:
             logging.info("Profiling memory usage...")
@@ -285,6 +292,10 @@ class GTFS:
         feed.ParseFromString(buf)
         timestamp = feed.header.timestamp
         num_updates, num_unrecognised_trips, num_added, num_cancelled = 0, 0, 0, 0
+        # CHANGE(tfi-gtfs): Collect updates grouped by raw stop_id in realtime-only mode.
+        # If running without static data, collect updates grouped by raw stop_id
+        realtime_only_stop_updates = collections.defaultdict(list) if getattr(settings, 'REALTIME_ONLY', False) else None
+
         for entity in feed.entity:
             if entity.HasField('trip_update'):
                 trip_id = entity.trip_update.trip.trip_id
@@ -299,7 +310,10 @@ class GTFS:
                     if self.filter_stops is None and stop_number is None:
                         # Not filtering stops, so we should recognise all of them.
                         logging.warning(f"Unrecognised stop_id {stop_time_update.stop_id} in live data feed.")
-                        continue
+                        # CHANGE(tfi-gtfs): Allow raw stop_id usage when static mapping is absent.
+                        # In realtime-only mode, we can still use the raw stop_id
+                        if not getattr(settings, 'REALTIME_ONLY', False):
+                            continue
                     if entity.trip_update.trip.schedule_relationship == TRIP_ADDED and stop_number is not None:
                         # We can only work with an unscheduled "added" trip if we are given the expected arrival time.
                         if stop_time_update.arrival.time:
@@ -326,7 +340,9 @@ class GTFS:
                         trip_info = self.get_trip_info(trip_id)
                         if trip_info is None:
                             num_unrecognised_trips += 1
-                            continue
+                            # In realtime-only mode we proceed using limited information
+                            if not getattr(settings, 'REALTIME_ONLY', False):
+                                continue
 
                         delay = arrival_time = None
                         if stop_time_update.arrival.time:
@@ -347,8 +363,29 @@ class GTFS:
                             'timestamp': timestamp
                         })
 
+                        # CHANGE(tfi-gtfs): Persist a per-stop_id view for realtime-only queries.
+                        # Collect a realtime-only view keyed by raw stop_id
+                        if realtime_only_stop_updates is not None:
+                            realtime_only_stop_updates[stop_time_update.stop_id].append({
+                                'trip_id': trip_id,
+                                'route_id': getattr(entity.trip_update.trip, 'route_id', None),
+                                'arrival': arrival_time,
+                                'delay': delay,
+                                'timestamp': timestamp,
+                            })
+
                 if len(trip_delays):
                     self.store.set('live_delays', trip_id, trip_delays)
+        # CHANGE(tfi-gtfs): Persist realtime-only per-stop data with pruning and ordering.
+        # Persist realtime-only per-stop data
+        if realtime_only_stop_updates is not None:
+            # Only keep reasonably recent items per stop
+            cutoff = timestamp - 3600
+            for stop_id, items in realtime_only_stop_updates.items():
+                trimmed = [i for i in items if i['timestamp'] > cutoff]
+                trimmed.sort(key=lambda i: (i['arrival'] or datetime.datetime.fromtimestamp(i['timestamp'])))
+                self.store.set('live_by_stop_id', stop_id, trimmed)
+
         logging.debug(f"Got {num_updates} trip updates, {num_unrecognised_trips} unrecognised trips, {num_added} added trips, {num_cancelled} cancelled trips")
     
     def refresh_live_data(self):
@@ -409,6 +446,32 @@ class GTFS:
         return self.store.get('stop_names', stop_number)
     
     def get_scheduled_arrivals(self, stop_number: str, now: datetime, max_wait: datetime.timedelta):
+        # CHANGE(tfi-gtfs): Return arrivals using only live feed data in realtime-only mode.
+        # realtime-only mode returns arrivals using only live feed data
+        if getattr(settings, 'REALTIME_ONLY', False):
+            # Accept either a known stop_number or a raw stop_id passed through
+            arrivals = []
+            # First try as a raw stop_id (since we may not have static stop mappings)
+            live_items = self.store.get('live_by_stop_id', stop_number, [])
+            if not live_items:
+                # Fall back to mapped stop_number -> stop_id items if any were stored
+                live_items = self.store.get('live_additions', stop_number, [])
+            for item in live_items:
+                # Build a minimal response; route/headsign/agency may be unavailable without static
+                rt_arrival = item.get('arrival')
+                if rt_arrival is None and item.get('delay') is not None:
+                    rt_arrival = now + datetime.timedelta(seconds=item['delay'])
+                if rt_arrival and rt_arrival >= now and rt_arrival <= now + max_wait:
+                    arrivals.append({
+                        'route': item.get('route_id') or '',
+                        'headsign': '',
+                        'agency': '',
+                        'scheduled_arrival': rt_arrival,
+                        'real_time_arrival': rt_arrival,
+                    })
+            arrivals.sort(key=lambda x: x['real_time_arrival'] or x['scheduled_arrival'])
+            return arrivals
+
         # get all the scheduled arrivals at a given stop_id
         # returns a list of (trip_id, arrival_time, stop_sequence)
         scheduled_arrivals = []
