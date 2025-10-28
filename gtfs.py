@@ -512,19 +512,19 @@ def check_cache_info(filter_stops):
 def check_for_new_static_data():
     if not os.path.exists(settings.DATA_DIR / "timestamp.txt"):
         return True
-    else:
-        with open(settings.DATA_DIR / "timestamp.txt", "r") as f:
-            timestamp = datetime.datetime.fromisoformat(f.read())
-            try:
-                with urllib.request.urlopen(
-                    urllib.request.Request(settings.GTFS_STATIC_URL, method="HEAD")
-                ) as response:
-                    last_modified_datetime = datetime.datetime.strptime(response.headers['Last-Modified'], '%a, %d %b %Y %H:%M:%S %Z')
-                    if last_modified_datetime > timestamp:
-                        return True
-            except urllib.error.URLError as e:
-                logging.error(f"Error checking for new static data: {e}")
-            
+#    else:
+#        with open(settings.DATA_DIR / "timestamp.txt", "r") as f:
+#            timestamp = datetime.datetime.fromisoformat(f.read())
+#            try:
+#                with urllib.request.urlopen(
+#                    urllib.request.Request(settings.GTFS_STATIC_URL, method="HEAD")
+#                ) as response:
+#                    last_modified_datetime = datetime.datetime.strptime(response.headers['Last-Modified'], '%a, %d %b %Y %H:%M:%S %Z')
+#                    if last_modified_datetime > timestamp:
+#                        return True
+#            except urllib.error.URLError as e:
+#                logging.error(f"Error checking for new static data: {e}")
+#            
     return False
 
 def download_static_data():
