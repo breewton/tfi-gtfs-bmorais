@@ -170,3 +170,41 @@ def download_gtfs_feed(access_token: str, feed_id: str, extract_dir: str = "data
         logger.info(f"Download successful! Extracted to: {extract_path} at {timestamp_to_save}")
 
     return extract_path
+
+
+def get_live_data(stop_id: list, api_key: str) -> dict:
+    """
+    Get live data for a list of stop IDs
+    """
+    if not stop_id:
+        raise ValueError("Stop_id must be provided")
+    if not api_key:
+        raise ValueError("API key must be provided")
+    BASE_URL = "http://localhost:7341"
+    header = {"X-API-KEY": api_key, "Accept": "application/json"}
+    url = f"{BASE_URL}/api/v1/arrivals"
+    params = {"stop": stop_id}
+    response = requests.get(url, params=params, headers=header)
+    return response.json()
+
+
+def get_df_from_live_data(response: dict) -> pd.DataFrame:
+    """
+    Convert live data to a pandas DataFrame
+    """
+    if not response:
+        raise ValueError("Response must be provided")
+    try:
+        stop_ids = list[str](response.keys())
+    except:
+        raise ValueError("Response must be a dictionary")
+
+    df = pd.DataFrame()
+    for stop_id in stop_ids:
+        # Each stop_id has a list of arrivals
+        # Each arrival has information about the agency, route, headsign, realtime of
+        # arrival and the scheduled time of arrival
+        row = pd.DataFrame(response[stop_id]['arrivals'])
+        row['stop_id'] = stop_id
+        df = pd.concat([df, row], ignore_index=True)
+    return df
