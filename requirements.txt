@@ -1,6 +1,15 @@
+# GTFS Realtime
 gtfs-realtime-bindings==1.0.0
+
+# Web Framework
 flask==2.3.3
 flask_cors==4.0.0
 waitress==2.1.2
+
+# Data Processing
+pandas>=2.0.0
+requests>=2.31.0
+
+# Configuration & Storage
 pyyaml==6.0.1
 redis==5.0.0
