@@ -16,11 +16,35 @@ The [National Transport Authority (NTA)](https://www.nationaltransport.ie/) of I
 
 This project is a GTFS-R client, which reads all static and realtime transport fleet information into RAM. It then provides a simple REST API to allow querying of upcoming scheduled and real-time arrivals at any particular stop.
 
-On startup, it downloads the static data and parses it into memory (by default, it will re-download this whenever the data is updated). It also periodically queries the real-time API, and stores received information about arrival delays, cancelations and additions into memory (by default, it will do this every minute). The in-memory information can then be efficiently queried to return a list of all scheduled and real-time arrivals at any particular stop.
+**UPDATED IN THIS VERSION:** On startup, the server loads static data from the local `data/` directory and parses it into memory. Users must manually download the GTFS static data before starting the server using the [Mobility Database API](https://mobilitydatabase.org/) via utility functions provided in `data_utils.py`. The server periodically queries the real-time API, and stores received information about arrival delays, cancelations and additions into memory (by default, it will do this every minute). The in-memory information can then be efficiently queried to return a list of all scheduled and real-time arrivals at any particular stop.
 
+**DEPRECATED:** Automatic downloading and checking for updated static data on startup has been removed. See the "Downloading Static GTFS Data" section below for the new workflow.
+
+**Why this change?** The Transport for Ireland static data URL (`https://www.transportforireland.ie/transitData/Data/GTFS_Realtime.zip`) returns **403 Forbidden** errors when accessed from certain geographic regions outside Ireland/UK/EU (e.g., Latin America). This makes automatic downloading unreliable for users in these regions. The [Mobility Database API](https://mobilitydatabase.org/) provides a globally accessible alternative that hosts mirrors of GTFS feeds without geographic restrictions.
 ## How to Run
 
 You can run this project either as a python program, as a Docker container or as a Home Assistant Addon. When running as a python program or a docker container you can choose whether to run the REST API HTTP server, or whether to directly invoke the gtfs.py module as a command-line utility.
+
+### Downloading Static GTFS Data (Required First Step)
+
+Before starting the server, you must download the static GTFS data using the [Mobility Database API](https://mobilitydatabase.org/):
+
+1. **Create a Mobility Database account** at [mobilitydatabase.org](https://mobilitydatabase.org/)
+2. **Generate a refresh token** from your account settings
+3. **Store your token** in `local_settings.py`:
+   ```python
+   MOBILITY_DB_REFRESH_TOKEN = "your_refresh_token_here"
+   ```
+4. **Download the data** using the provided utility functions (see `explore.ipynb` for examples):
+   ```python
+   import data_utils
+   import local_settings
+   
+   token = data_utils.get_access_token(local_settings.MOBILITY_DB_REFRESH_TOKEN)
+   path = data_utils.download_gtfs_feed(token, "mdb-2364")  # TFI Feed ID
+   ```
+
+The static data will be downloaded to the `data/` directory. You should re-download this data periodically (e.g., monthly) to get schedule updates.
 
 ## Configuration
 
@@ -37,7 +61,7 @@ The API key, and all other settings, can be alternatively specified as (in order
 You can view the available settings and default values by running `server.py` or `gtfs.py` with the `--help` argument.
 
 For reference, the available settings are:
-- `GTFS_STATIC_URL`. URL of the static NTA data. Defaults to "https://www.transportforireland.ie/transitData/Data/GTFS_Realtime.zip"
+- `GTFS_STATIC_URL`. **DEPRECATED** - URL of the static NTA data. Defaults to "https://www.transportforireland.ie/transitData/Data/GTFS_Realtime.zip". *(In this version, static data should be downloaded manually via Mobility Database API instead)*
 - `GTFS_LIVE_URL`. URL of the realtime NTA data. Defaults to "https://api.nationaltransport.ie/gtfsr/v2/TripUpdates"
 - `API_KEY`. Your NTA API key. Either your "primary" or "secondary" key should work.
 - `REDIS_URL`. The URL of a redis instance to use as a memory store for the purposes of memory optimisation or horizontal scalability. Typically something like `redis://localhost:6379`. Defaults to `None`, i.e., uses in-process memory instead.
@@ -96,11 +120,12 @@ Run as a command-line interface:
 python3 gtfs.py --help
 ```
 
-Download the static database and exit:
+**DEPRECATED** - Download the static database and exit:
 
 ``` bash
 python3 gtfs.py --download
 ```
+*(This command is deprecated. Use the Mobility Database API via `data_utils.py` instead. See "Downloading Static GTFS Data" section above.)*
 
 Query specific stops:
 ``` bash
@@ -279,9 +304,11 @@ The `gtfs.py` module can be invoked directly as a command line utility, and runs
 
 Internally, `server.py` uses [Waitress](https://docs.pylonsproject.org/projects/waitress/en/latest/index.html) to serve HTTP API requests. *Waitress* starts a pool of worker threads to handle requests. The default number of threads is specified by the `WORKERS` setting or `--workers` argument, and defaults to `1`.
 
-`server.py` also starts a long-lived thread to handle scheduled tasks like polling the live API, or redownloading the static schedule data.
+`server.py` also starts a long-lived thread to handle scheduled tasks like polling the live API.
 
-Actual downloading and parsing of static schedule data is handled in sub-processes, as it is a memory-intensive operation, and we want to allow the system to reclaim that memory after the new schedule has been processed. These sub-processes are simply instances of `gtfs.py`. `server.py` will launch `gtfs.py` in this way on startup (if the current downloaded schedule is out of date, or if the current cache is out of data or invalid). It will also check every hour if there is new static GTFS data (by performing a `HTTP HEAD` request) available and if necessary will launch `gtfs.py` to download it.
+**DEPRECATED:** Automatic downloading and parsing of static schedule data is handled in sub-processes, as it is a memory-intensive operation, and we want to allow the system to reclaim that memory after the new schedule has been processed. These sub-processes are simply instances of `gtfs.py`. `server.py` will launch `gtfs.py` in this way on startup (if the current downloaded schedule is out of date, or if the current cache is out of data or invalid). It will also check every hour if there is new static GTFS data (by performing a `HTTP HEAD` request) available and if necessary will launch `gtfs.py` to download it.
+
+**UPDATED IN THIS VERSION:** Automatic downloading has been removed. The server will load static data from the local `data/` directory on startup. Users must manually download static data via the Mobility Database API using `data_utils.py` functions before starting the server.
 
 `server.py` runs `gtfs.py ` with the `--rebuild-cache` argument, which causes it to re-parse the static GTFS data (which may consume in the region of 1.5 gigabytes of RAM) and write a new `cache.pickle` file (which may take a minute or more depending on your hardware).  After writing the pickle file, the `gtfs.py` process ends, its memory is released, and `server.py` continues execution, by loading or reloading that pickle file, which is a fast operation.
 
@@ -300,15 +327,17 @@ The project consists of the following modules:
 - `settings.py` is a simple settings file.
 - `size.py` is the memory-counting function from [this gist](https://gist.github.com/nkonin/072e891b0e27ef7fa8e072aa7c7a7cb1)
 - `store.py` is a data store, which is backed by either *redis* or an internal `dict` depending on configuration.  It supports key-value style `get`/`set` operations, and `Set`-like `add`/`remove`/`has` operations. Everything is added to a "namespace", and a config `dict` can be passed in at initialization with optional rules for how items in each namespace should be expired.
-- `gtfs.py` contains all code related to interacting with the GTFS static schedule data and GTFS-R live feed. It provides  functions to check, download and extract the static GTFS data, and provides a `GTFS` class that loads that data, can query the live GTFS feed, and allows the data to be queried for upcoming arrivals at any given stop. It uses `store.py` to record all GTFS data, making it agnostic to whether data is being stored in-process or in redis. It also exposes an entrypoint so it can be run as a standalone command line utility.
+- `data_utils.py` **[NEW]** provides utility functions for downloading and processing GTFS data. It includes functions to authenticate with the Mobility Database API, download GTFS feeds, extract zip files, and convert live data responses to pandas DataFrames.
+- `gtfs.py` contains all code related to interacting with the GTFS static schedule data and GTFS-R live feed. It provides functions to check, download and extract the static GTFS data **⚠️ DEPRECATED**, and provides a `GTFS` class that loads that data, can query the live GTFS feed, and allows the data to be queried for upcoming arrivals at any given stop. It uses `store.py` to record all GTFS data, making it agnostic to whether data is being stored in-process or in redis. It also exposes an entrypoint so it can be run as a standalone command line utility.
 
 - `server.py`:
-    - runs `gtfs.py` in a sub-process as-required to download static data and rebuild the cache.
+    - **DEPRECATED:** runs `gtfs.py` in a sub-process as-required to download static data and rebuild the cache.
+    - **UPDATED:** runs `gtfs.py` in a sub-process as-required to rebuild the cache from locally stored static data
     - creates an instance of the `gtfs.GTFS` class that it uses to fulfil API requests
-    - starts a thread to manage scheduled tasks
+    - starts a thread to manage scheduled tasks **UPDATED:** (polling live API only; automatic static data downloading removed)
     - runs the HTTP server
 
-Static GTFS data is downloaded to the `/data` directory.
+Static GTFS data should be manually downloaded to the `/data` directory using the `data_utils.py` functions.
 
 ### Running and Debugging
 
