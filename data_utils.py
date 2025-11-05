@@ -42,14 +42,19 @@ def get_files_from_path(directory: str, extension: str) -> list:
 
 def generate_df_from_txt(filename: str) -> pd.DataFrame:
     '''
-    Reads a txt file and [always] returns a pandas DataFrame even if the file is empty.
-    If the file is empty, the DataFrame will have 0 rows.
+    Reads a txt file and returns a pandas DataFrame.
+    Returns an empty DataFrame if the file is empty or has no data rows.
 
     Args:
         filename: str - The filename of the txt file to read.
 
     Returns:
         pd.DataFrame - A pandas DataFrame of the txt file.
+    
+    Raises:
+        ValueError: If filename is not provided.
+        FileNotFoundError: If the file does not exist.
+        pd.errors.ParserError: If the file cannot be parsed as CSV.
     '''
     if not filename:
         raise ValueError("Filename is required")
@@ -59,20 +64,28 @@ def generate_df_from_txt(filename: str) -> pd.DataFrame:
         logger.debug(f"Successfully read {filename} and returned a pandas DataFrame with {len(df)} rows")
         return df
 
-    except Exception as e:
-        logger.error(f"Error reading {filename}: {e}")
-        return pd.DataFrame() # empty DataFrame if the file is empty
+    except FileNotFoundError:
+        logger.error(f"File not found: {filename}")
+        raise
+    
+    except pd.errors.ParserError as e:
+        logger.error(f"Error parsing {filename}: {e}")
+        raise
+    
+    except pd.errors.EmptyDataError:
+        logger.warning(f"File {filename} is empty, returning empty DataFrame")
+        return pd.DataFrame()
 
-def get_access_token(refresh_token: str) -> str | None:
+def get_access_token(refresh_token: str) -> str:
     '''
     Args:
         refresh_token: str - The refresh token for the Mobility Database API.
     
     Returns:
-        str | None - The access token if successful, None otherwise.
+        str - The access token.
     
     Raises:
-        ValueError: If refresh_token is not provided.
+        ValueError: If refresh_token is not provided or access token not found in response.
         requests.HTTPError: If the API request fails.
     '''
     if not refresh_token:
@@ -99,6 +112,33 @@ def get_access_token(refresh_token: str) -> str | None:
     
     logger.info(f"Access token generated successfully: {access_token}")
     return access_token
+
+def extract_zip_from_bytes(zip_content: bytes, extract_path: Path) -> None:
+    """
+    Extract a zip file from bytes content to a specified directory.
+
+    Args:
+        zip_content: bytes - The zip file content as bytes.
+        extract_path: Path - The directory path to extract files to.
+
+    Raises:
+        ValueError: If zip_content or extract_path is not provided.
+        zipfile.BadZipFile: If the content is not a valid zip file.
+    """
+    if not zip_content:
+        raise ValueError("Zip content must be provided")
+    
+    if not extract_path:
+        raise ValueError("Extract path must be provided")
+    
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_content)) as zip_ref:
+            zip_ref.extractall(extract_path)
+        logger.info(f"Successfully extracted zip file to: {extract_path}/")
+    
+    except zipfile.BadZipFile as e:
+        logger.error(f"Invalid zip file: {e}")
+        raise
 
 def download_gtfs_feed(access_token: str, feed_id: str, extract_dir: str = "data") -> Path:
     '''
@@ -153,8 +193,7 @@ def download_gtfs_feed(access_token: str, feed_id: str, extract_dir: str = "data
     extract_path = Path(extract_dir)
     extract_path.mkdir(exist_ok=True)
 
-    with zipfile.ZipFile(io.BytesIO(zip_response.content)) as zip_ref:
-        zip_ref.extractall(extract_path)
+    extract_zip_from_bytes(zip_response.content, extract_path)
 
     downloaded_at = feed_data.get('latest_dataset', {}).get('downloaded_at', None)
     timestamp_to_save = downloaded_at if downloaded_at else datetime.now().isoformat()
@@ -167,7 +206,7 @@ def download_gtfs_feed(access_token: str, feed_id: str, extract_dir: str = "data
         logger.info(f"Download successful! Extracted to: {extract_path} at {downloaded_at}")
     else:
         logger.warning("No downloaded at timestamp available in feed data. Saved current timestamp.")
-        logger.info(f"Download successful! Extracted to: {extract_path} at {timestamp_to_save}")
+        logger.info(f"Download successful! Extracted to: {extract_path}/ at {timestamp_to_save}")
 
     return extract_path
 
@@ -175,6 +214,17 @@ def download_gtfs_feed(access_token: str, feed_id: str, extract_dir: str = "data
 def get_live_data(stop_id: list, api_key: str) -> dict:
     """
     Get live data for a list of stop IDs
+
+    Args:
+        stop_id: list - The list of stop IDs to get live data for.
+        api_key: str - The API key to use to get live data.
+
+    Returns:
+        dict - The live data for the stop IDs.
+
+    Raises:
+        ValueError: If stop_id or api_key is not provided.
+        requests.HTTPError: If the API request fails.
     """
     if not stop_id:
         raise ValueError("Stop_id must be provided")
@@ -185,26 +235,54 @@ def get_live_data(stop_id: list, api_key: str) -> dict:
     url = f"{BASE_URL}/api/v1/arrivals"
     params = {"stop": stop_id}
     response = requests.get(url, params=params, headers=header)
+    logger.info(f"Request data for stop {stop_id}")
+    
+    # Raise an exception for HTTP errors, i.e. anything different than 2xx
+    response.raise_for_status()
+
+    logger.info(f"Live data retrieved successfully for stop IDs: {stop_id}")
     return response.json()
 
 
 def get_df_from_live_data(response: dict) -> pd.DataFrame:
     """
-    Convert live data to a pandas DataFrame
+    Convert live data to a pandas DataFrame.
+    Flattens the nested structure where each stop has multiple arrivals.
+
+    Args:
+        response: dict - The live data response from the API.
+                        Expected format: {stop_id: {'arrivals': [...]}, ...}
+
+    Returns:
+        pd.DataFrame - Flattened DataFrame with columns: agency, headsign, 
+                      real_time_arrival, route, scheduled_arrival, stop_id
+
+    Raises:
+        ValueError: If response is not provided or is not a dictionary.
+        KeyError: If response structure is invalid (missing 'arrivals' key).
     """
     if not response:
         raise ValueError("Response must be provided")
-    try:
-        stop_ids = list[str](response.keys())
-    except:
+    
+    if not isinstance(response, dict):
         raise ValueError("Response must be a dictionary")
-
-    df = pd.DataFrame()
-    for stop_id in stop_ids:
+    
+    # Collect all DataFrames first
+    all_rows = []
+    for stop_id in response.keys():
         # Each stop_id has a list of arrivals
-        # Each arrival has information about the agency, route, headsign, realtime of
-        # arrival and the scheduled time of arrival
-        row = pd.DataFrame(response[stop_id]['arrivals'])
-        row['stop_id'] = stop_id
-        df = pd.concat([df, row], ignore_index=True)
+        # Each arrival has information about the agency, route, headsign, 
+        # real_time_arrival and scheduled_arrival
+        arrivals = response[stop_id].get('arrivals', [])
+        if arrivals:
+            row = pd.DataFrame(arrivals)
+            row['stop_id'] = stop_id
+            all_rows.append(row)
+    
+    if not all_rows:
+        logger.warning("No arrivals found in response, returning empty DataFrame")
+        return pd.DataFrame()
+    
+    df = pd.concat(all_rows, ignore_index=True)
+    logger.info(f"Created DataFrame with {len(df)} arrivals from {len(response)} stops")
     return df
